@@ -1,5 +1,3 @@
-# GPU_CZW0730_test_pierwszosci_Rabina_Millera
-
 # Projekt Testu Pierwszości Rabin-Millera Równoległego
 
 ## 📝 Opis
