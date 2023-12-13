@@ -2,15 +2,85 @@ import numpy as np
 import time
 from multiprocessing import Pool
 import pyopencl as cl
-import numpy as np
+import csv
 
-# Ustalenie kontekstu OpenCL i kolejki
-platforms = cl.get_platforms()
-devices = platforms[0].get_devices()
-context = cl.Context(devices)
-queue = cl.CommandQueue(context)
 
-# Przygotowanie kodu kernela OpenCL
+# Generate a list of n random numbers
+def generate_random_numbers(n, max_value):
+    return np.random.randint(2, max_value, size=n, dtype=np.int64)
+
+
+# Rabin-Miller primality test function (CPU-based)
+def is_prime_cpu(n, k):
+    n = int(n)  # Convert to Python's native integer type
+    if n == 2 or n == 3:
+        return True
+    if n % 2 == 0 or n < 2:
+        return False
+
+    s, d = 0, n - 1
+    while d % 2 == 0:
+        s += 1
+        d //= 2
+
+    for _ in range(k):
+        a = np.random.default_rng().integers(2, n - 1, endpoint=True)
+        a = int(a)  # Convert to Python's native integer type
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1:
+            continue
+        for r in range(s):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
+
+
+# Sequential CPU processing
+def sequential_prime_test(numbers, k):
+    return [is_prime_cpu(n, k) for n in numbers]
+
+
+# Multiprocessing CPU processing
+def parallel_prime_test(numbers, k):
+    with Pool(processes=None) as pool:
+        return pool.starmap(is_prime_cpu, [(n, k) for n in numbers])
+
+
+# GPU-based processing using OpenCL
+def gpu_prime_test(numbers, k, kernel_code):
+    platforms = cl.get_platforms()
+    devices = platforms[0].get_devices()
+    context = cl.Context(devices)
+    queue = cl.CommandQueue(context)
+    program = cl.Program(context, kernel_code).build()
+
+    numbers_np = np.array(numbers, dtype=np.int64)
+    results_np = np.zeros_like(numbers_np, dtype=np.int8)
+    random_numbers = np.random.randint(2, numbers_np.max(), size=(len(numbers_np) * k,), dtype=np.int64)
+
+    numbers_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=numbers_np)
+    results_buf = cl.Buffer(context, cl.mem_flags.WRITE_ONLY, results_np.nbytes)
+    random_numbers_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=random_numbers)
+
+    program.is_prime_gpu(queue, (len(numbers_np),), None, numbers_buf, results_buf, np.uint32(k), random_numbers_buf).wait()
+    cl.enqueue_copy(queue, results_np, results_buf)
+    queue.finish()
+
+    return list(results_np)
+
+
+# Timing function
+def time_function(func, *args):
+    start_time = time.time()
+    results = func(*args)
+    end_time = time.time()
+    return results, end_time - start_time
+
+
+# OpenCL kernel code
 kernel_code = """
 long pow_mod(long base, long exponent, long modulus) {
     long result = 1;
@@ -72,96 +142,35 @@ __kernel void is_prime_gpu(__global const long* numbers, __global char* results,
 """
 
 
-# Function to check if n is prime, used for the Rabin Miller test
-def is_prime(n, k=7):  # number of tests = k
-    if n == 2 or n == 3:
-        return True
-    if n % 2 == 0 or n < 2:
-        return False
+def write_to_csv(file_name, data):
+    with open(file_name, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(data)
 
-    s, d = 0, n - 1
-    while d % 2 == 0:
-        s += 1
-        d //= 2
-
-    for _ in range(k):
-        a = np.random.randint(2, n-1, dtype=np.int64).item()
-        x = pow(a, d, n)
-        if x == 1 or x == n - 1:
-            continue
-        for r in range(s):
-            x = pow(x, 2, n)
-            if x == n - 1:
-                break
-        else:
-            return False
-    return True
-
-# Function to parallelize with multiple processes
-def parallel_prime_test(n):
-    return is_prime(n)
-
-# Function to test primes without multiprocessing
-def sequential_prime_test(numbers):
-    return [is_prime(n) for n in numbers]
 
 if __name__ == '__main__':
-    # List of numbers to test for primality
-    numbers = [999331, 1111111111111111111, 982451653]
+    k = 5  # Number of tests in Rabin-Miller
+    max_value = 10**12
+    start_n = 100  # Starting value of n
 
-    # Using multiprocessing
-    start_time_mp = time.time()
-    with Pool(processes=None) as pool:
-        results_mp = pool.map(parallel_prime_test, numbers)
-    end_time_mp = time.time()
+    for i in range(4):  # 10 different values of n
+        n = start_n * (10 ** i)  # Increase n by a factor of 10 each iteration
+        print(f"\nTesting for n = {n}")
 
-    # Sequential processing
-    start_time_seq = time.time()
-    results_seq = sequential_prime_test(numbers)
-    end_time_seq = time.time()
+        for _ in range(3):
+            numbers = generate_random_numbers(n, max_value)
 
-    # Output the results and time taken for multiprocessing
-    print("Multiprocessing results:")
-    for number, result in zip(numbers, results_mp):
-        print(f"{number} is {'prime' if result else 'not prime'}")
-    print(f"Time taken with multiprocessing: {end_time_mp - start_time_mp} seconds")
+            # # GPU processing
+            # gpu_results, gpu_time = time_function(gpu_prime_test, numbers, k, kernel_code)
+            # print(f"GPU processing time: {gpu_time} seconds")
+            # write_to_csv('gpu_times.csv', [n, gpu_time])
 
-    # Output the results and time taken for sequential processing
-    print("\nSequential results:")
-    for number, result in zip(numbers, results_seq):
-        print(f"{number} is {'prime' if result else 'not prime'}")
-    print(f"Time taken with sequential processing: {end_time_seq - start_time_seq} seconds")
+            # Sequential CPU processing
+            seq_results, seq_time = time_function(sequential_prime_test, numbers, k)
+            print(f"Sequential CPU processing time: {seq_time} seconds")
+            write_to_csv('sequential_times.csv', [n, seq_time])
 
-    # Kompilacja kernela
-    program = cl.Program(context, kernel_code).build()
-
-    # Przygotowanie danych
-    numbers = np.array([999331, 1111111111111111111, 982451653], dtype=np.int64)
-    results = np.zeros_like(numbers, dtype=np.int8)
-    k = 7
-
-    # Generowanie liczb losowych dla testu Rabin-Miller
-    np.random.seed(0)  # Dla powtarzalności wyników, w praktyce użyj np.random.default_rng()
-    random_numbers = np.random.randint(2, numbers.max(), size=(len(numbers) * k,), dtype=np.int64)
-
-    # Utworzenie buforów pamięci
-    numbers_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=numbers)
-    results_buf = cl.Buffer(context, cl.mem_flags.WRITE_ONLY, results.nbytes)
-    random_numbers_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=random_numbers)
-
-    # Uruchomienie kernela i mierzenie czasu
-    start_time_gpu = time.time()
-    kernel_event = program.is_prime_gpu(queue, (len(numbers),), None, numbers_buf, results_buf, np.uint32(k),
-                                        random_numbers_buf)
-    kernel_event.wait()  # Czeka na zakończenie wykonania kernela
-    end_time_gpu = time.time()
-
-    # Odczytanie wyników
-    cl.enqueue_copy(queue, results, results_buf)
-    queue.finish()  # Czekaj na zakończenie wszystkich operacji w kolejce
-
-    # Wypisanie wyników i czasu wykonania na GPU
-    print("\nGPU results:")
-    for number, result in zip(numbers, results):
-        print(f"{number} is {'prime' if result else 'not prime'}")
-    print(f"Time taken with GPU: {end_time_gpu - start_time_gpu} seconds")
+            # # Multiprocessing CPU processing
+            # mp_results, mp_time = time_function(parallel_prime_test, numbers, k)
+            # print(f"Multiprocessing CPU processing time: {mp_time} seconds")
+            # write_to_csv('multiprocessing_times.csv', [n, mp_time])
